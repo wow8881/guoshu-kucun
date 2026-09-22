@@ -1,148 +1,441 @@
 import os
+import glob
 import pandas as pd
+import numpy as np
 import streamlit as st
-from datetime import datetime, date
-import uuid
-
-# ========== 改你自己的密码 ==========
-ADMIN_PASSWORD = "你自己设一个密码"
-SHOP_NAME = "我的果蔬店"
-SUPPLIER_LIST = ["本地蔬菜批发", "山东蔬菜基地", "菌菇配送中心", "烟台苹果直供", "本地草莓基地"]
-# ======================================
-
-# 云部署持久化数据，不会丢
-@st.cache_data(ttl=0)
-def load_data():
-    if os.path.exists("delivery_records.csv"):
-        return pd.read_csv("delivery_records.csv", dtype=str).fillna("")
-    else:
-        return pd.DataFrame(columns=[
-            "提交时间","供应商名称","送货日期","商品名称","品类",
-            "送货数量","单位","进货单价","保质期(天)"
-        ])
-
-def save_data(df):
-    df.to_csv("delivery_records.csv", index=False, encoding='utf-8-sig')
-
-st.set_page_config(page_title=f"{SHOP_NAME} 送货填报", layout="centered", page_icon="📝")
-menu = st.sidebar.radio("菜单", ["📝 供应商填报", "🔒 后台导出数据"])
-
-# ========== 供应商填报页 ==========
-if menu == "📝 供应商填报":
-    st.title(f"🚚 {SHOP_NAME} 送货登记")
-    st.caption("填写当日送货信息，提交后商家即可收到")
-    
-    if 'rows' not in st.session_state:
-        st.session_state.rows = 1
-    if 'ok' not in st.session_state:
-        st.session_state.ok = False
-
-    if st.session_state.ok:
-        st.success("✅ 提交成功！商家已收到，感谢配合")
-        if st.button("填写新送货单"):
-            st.session_state.ok = False
-            st.session_state.rows = 1
-            st.rerun()
-        st.stop()
-
-    with st.form("form"):
-        col1, col2 = st.columns(2)
-        with col1:
-            supplier = st.selectbox("您的供应商名称", ["请选择"] + SUPPLIER_LIST + ["其他（手动填写）"])
-            if supplier == "其他（手动填写）":
-                supplier = st.text_input("输入名称", placeholder="例如：XX果蔬批发")
-        with col2:
-            delivery_date = st.date_input("送货日期", value=date.today())
-        
-        st.divider()
-        st.subheader("商品明细")
-        goods = []
-        for i in range(st.session_state.rows):
-            st.markdown(f"**商品 {i+1}**")
-            c1,c2,c3 = st.columns(3)
-            name = c1.text_input("品种名称", key=f"n{i}", placeholder="上海青")
-            cat = c2.selectbox("品类", ["叶菜","根茎","花果","菌菇","水果","其他"], key=f"c{i}")
-            unit = c3.selectbox("单位", ["斤","公斤","箱","袋"], key=f"u{i}")
-            qty = c1.number_input("送货数量", min_value=0.0, step=0.5, key=f"q{i}")
-            price = c2.number_input("进货单价(元)", min_value=0.0, step=0.1, key=f"p{i}")
-            life = c3.number_input("保质期(天)", min_value=1, value=2, key=f"l{i}")
-            if name and qty>0:
-                goods.append({
-                    "提交时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "供应商名称": supplier if supplier!="请选择" else "未填写",
-                    "送货日期": delivery_date.strftime("%Y-%m-%d"),
-                    "商品名称": name,
-                    "品类": cat,
-                    "送货数量": str(qty),
-                    "单位": unit,
-                    "进货单价": str(price),
-                    "保质期(天)": str(life)
-                })
-            st.divider()
-        
-        b1,b2,_ = st.columns([1,1,3])
-        add = b1.form_submit_button("➕ 加一个品种", use_container_width=True)
-        delete = b2.form_submit_button("➖ 删除最后一行", use_container_width=True)
-        submit = st.form_submit_button("✅ 提交送货单", type="primary", use_container_width=True)
-
-    if add and st.session_state.rows < 20:
-        st.session_state.rows += 1
+import matplotlib.pyplot as plt
+from datetime import datetime
+# ========== 页面基础配置 ==========
+st.set_page_config(page_title="果蔬库存实时看板", layout="wide", page_icon="🥬", initial_sidebar_state="expanded")
+plt.rcParams['font.sans-serif'] = ['SimHei', 'WenQuanYi Micro Hei', 'Arial Unicode MS', 'Noto Sans CJK SC', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
+# 自动找和py文件同一个目录下的inventory文件夹，不存在就自动创建
+current_dir = os.path.dirname(os.path.abspath(__file__))
+INVENTORY_FOLDER = os.path.join(current_dir, "inventory")
+os.makedirs(INVENTORY_FOLDER, exist_ok=True)  # 自动创建文件夹，不用手动建
+# 提前定义数据加载函数
+@st.cache_data(show_spinner=False)
+def load_latest_inventory():
+    files = []
+    for ext in ['xlsx', 'csv']:
+        files.extend(glob.glob(os.path.join(INVENTORY_FOLDER, f"*.{ext}")))
+    if not files:
+        return None, "empty"
+    latest_file = max(files, key=os.path.getmtime)
+    try:
+        if latest_file.endswith('.csv'):
+            df = None
+            for enc in ['utf-8-sig', 'utf-8', 'gbk', 'gb2312']:
+                try:
+                    df = pd.read_csv(latest_file, encoding=enc)
+                    break
+                except:
+                    continue
+            if df is None:
+                return None, "read_error"
+        else:
+            df = pd.read_excel(latest_file)
+        return df, os.path.basename(latest_file)
+    except Exception as e:
+        return None, f"error:{str(e)}"
+# ========== 侧边栏配置 ==========
+with st.sidebar:
+    st.header("⚙️ 看板配置")
+    SHOP_NAME = st.text_input("店铺名称", value="我的果蔬店")
+    LOW_STOCK_WARN = st.number_input("库存预警阈值（低于该值提醒补货）", min_value=1, value=10, step=1)
+    DEFAULT_UNIT = st.text_input("默认单位", value="斤")
+    st.divider()
+    # ========== 新增：数据提报/上传区域 ==========
+    st.header("📝 数据提报/同步")
+    data_tab1, data_tab2, data_tab3 = st.tabs(["📤 上传文件", "✍️ 新增商品", "🗑️ 管理商品"])
+    # 上传文件提报
+    with data_tab1:
+        uploaded_file = st.file_uploader("上传库存Excel/CSV", type=['xlsx', 'csv'], help="上传后自动保存到inventory文件夹，作为最新数据")
+        if uploaded_file is not None:
+            if st.button("确认上传并同步", use_container_width=True, type="primary"):
+                # 保存上传的文件到inventory文件夹，用时间戳命名避免重名
+                ext = os.path.splitext(uploaded_file.name)[1]
+                save_name = f"库存提报_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
+                save_path = os.path.join(INVENTORY_FOLDER, save_name)
+                with open(save_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+                st.success(f"✅ 已同步保存到文件夹：{save_name}")
+                st.cache_data.clear()
+                st.rerun()
+    # 手动录入单个商品
+    with data_tab2:
+        with st.form("add_product_form", clear_on_submit=True):
+            p_name = st.text_input("商品名称 *", placeholder="例如：上海青")
+            p_cat = st.text_input("品类 *", placeholder="例如：叶菜类")
+            col1, col2 = st.columns(2)
+            p_stock = col1.number_input("库存数量 *", min_value=0, step=1)
+            p_shelf = col2.number_input("保质期(天) *", min_value=1, value=7, step=1)
+            p_in_date = st.date_input("入库时间", value=datetime.now())
+            p_unit = st.text_input("单位", value=DEFAULT_UNIT)
+            p_price = st.number_input("进货价(元/单位)", min_value=0.0, step=0.1)
+            p_supplier = st.text_input("供应商名称", value="未填写")
+            submit_add = st.form_submit_button("提交并同步到库存", use_container_width=True, type="primary")
+            if submit_add:
+                if not p_name or not p_cat:
+                    st.error("请填写商品名称和品类")
+                else:
+                    # 先读取现有最新数据，追加新商品
+                    existing_df, _ = load_latest_inventory()
+                    new_row = pd.DataFrame([{
+                        '商品名称': p_name.strip(),
+                        '品类': p_cat.strip(),
+                        '库存数量': p_stock,
+                        '入库时间': pd.Timestamp(p_in_date),
+                        '保质期(天)': p_shelf,
+                        '单位': p_unit.strip() if p_unit else DEFAULT_UNIT,
+                        '进货价': p_price if p_price > 0 else None,
+                        '供应商名称': p_supplier.strip() if p_supplier else "未填写"
+                    }])
+                    if existing_df is not None:
+                        updated_df = pd.concat([existing_df, new_row], ignore_index=True)
+                    else:
+                        updated_df = new_row
+                    # 保存新文件到inventory
+                    save_name = f"库存更新_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                    save_path = os.path.join(INVENTORY_FOLDER, save_name)
+                    updated_df.to_excel(save_path, index=False)
+                    st.success(f"✅ 已添加商品「{p_name}」并同步到文件夹")
+                    st.cache_data.clear()
+                    st.rerun()
+    # 管理现有商品：修改库存/删除
+    with data_tab3:
+        existing_df, _ = load_latest_inventory()
+        if existing_df is None or len(existing_df) == 0:
+            st.info("暂无库存数据，先上传或添加商品")
+        else:
+            # 补全列避免报错
+            if '单位' not in existing_df.columns:
+                existing_df['单位'] = DEFAULT_UNIT
+            all_products = existing_df['商品名称'].tolist()
+            selected_p = st.selectbox("选择要修改的商品", all_products)
+            if selected_p:
+                p_data = existing_df[existing_df['商品名称'] == selected_p].iloc[0]
+                new_stock = st.number_input("修改库存数量", min_value=0, value=int(p_data['库存数量']), step=1)
+                if st.button("更新库存", use_container_width=True):
+                    existing_df.loc[existing_df['商品名称'] == selected_p, '库存数量'] = new_stock
+                    save_name = f"库存更新_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                    save_path = os.path.join(INVENTORY_FOLDER, save_name)
+                    existing_df.to_excel(save_path, index=False)
+                    st.success(f"✅ 已更新「{selected_p}」库存为 {new_stock}")
+                    st.cache_data.clear()
+                    st.rerun()
+                st.divider()
+                if st.button("🗑️ 删除该商品", use_container_width=True, type="secondary"):
+                    updated_df = existing_df[existing_df['商品名称'] != selected_p]
+                    save_name = f"库存更新_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                    save_path = os.path.join(INVENTORY_FOLDER, save_name)
+                    updated_df.to_excel(save_path, index=False)
+                    st.success(f"✅ 已删除商品「{selected_p}」")
+                    st.cache_data.clear()
+                    st.rerun()
+    st.divider()
+    if st.button("🔄 刷新最新数据", use_container_width=True):
+        st.cache_data.clear()
         st.rerun()
-    if delete and st.session_state.rows>1:
-        st.session_state.rows -= 1
-        st.rerun()
-
-    if submit:
-        if supplier == "请选择":
-            st.error("❌ 请先选择供应商名称")
-            st.stop()
-        if len(goods) == 0:
-            st.error("❌ 请至少填写一个商品")
-            st.stop()
-        df_old = load_data()
-        df_new = pd.DataFrame(goods)
-        df_all = pd.concat([df_old, df_new], ignore_index=True)
-        save_data(df_all)
-        st.session_state.ok = True
-        st.rerun()
-
-# ========== 后台导出页 ==========
+    st.markdown("""
+    ### 📖 使用说明
+    1. 系统自动创建`inventory`文件夹，无需手动新建
+    2. 可以直接上传Excel/CSV、手动新增商品、修改/删除商品
+    3. 所有操作自动保存同步到文件夹，自动加载最新版本
+    4. **必填列**：商品名称、品类、库存数量、入库时间、保质期(天)
+    5. **可选列**：单位、进货价、供应商名称
+    """)
+st.title(f"🥬 {SHOP_NAME} 库存实时数据看板")
+st.caption(f"最后更新时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}")
+result = load_latest_inventory()
+if result[1] == "empty":
+    st.info("💡 还没有库存数据，请在左侧上传Excel文件，或者手动新增商品开始使用~")
+    st.stop()
+elif result[1] == "read_error":
+    st.error(f"读取文件失败：文件编码无法识别，请保存为UTF-8格式的Excel或CSV")
+    st.stop()
+elif result[1].startswith("error:"):
+    st.error(f"读取文件失败：{result[1][6:]}，请检查文件格式")
+    st.stop()
+df, filename = result
+st.success(f"✅ 正在读取最新库存文件：{filename}")
+# 数据预处理
+required_cols = ['商品名称','品类','库存数量','入库时间','保质期(天)']
+missing = [c for c in required_cols if c not in df.columns]
+if missing:
+    st.error(f"❌ 文件缺少必填列：{', '.join(missing)}，请检查列名")
+    st.info("💡 必填列：商品名称、品类、库存数量、入库时间、保质期(天)；可选列：单位、进货价、供应商名称")
+    st.stop()
+# 数据清洗：处理异常值
+df = df.dropna(subset=['商品名称', '品类'])  # 删除空名称空品类的行
+df['商品名称'] = df['商品名称'].astype(str).str.strip()
+df['品类'] = df['品类'].astype(str).str.strip()
+df['库存数量'] = pd.to_numeric(df['库存数量'], errors='coerce').fillna(0).clip(lower=0)  # 负数库存转为0
+df['保质期(天)'] = pd.to_numeric(df['保质期(天)'], errors='coerce').fillna(30).clip(lower=1)  # 异常保质期默认30天
+# 补全可选字段
+if '单位' not in df.columns:
+    df['单位'] = DEFAULT_UNIT
+df['单位'] = df['单位'].fillna(DEFAULT_UNIT).astype(str).str.strip()
+if '供应商名称' not in df.columns:
+    df['供应商名称'] = '未填写'
+df['供应商名称'] = df['供应商名称'].fillna('未填写').astype(str).str.strip()
+df['入库时间'] = pd.to_datetime(df['入库时间'], errors='coerce')
+# 处理无效入库时间：超过今天的设为今天，空值设为今天
+invalid_date_mask = df['入库时间'].isna() | (df['入库时间'] > pd.Timestamp(datetime.now()))
+df.loc[invalid_date_mask, '入库时间'] = pd.Timestamp(datetime.now().date())
+today = pd.Timestamp(datetime.now().date())
+df['已存放天数'] = (today - df['入库时间']).dt.days
+df['剩余保质期(天)'] = (df['保质期(天)'] - df['已存放天数']).clip(lower=0)  # 负剩余天数统一为0
+# 进货价可选，没有就不计算货值
+total_value = None
+if '进货价' in df.columns:
+    df['进货价'] = pd.to_numeric(df['进货价'], errors='coerce').fillna(0)
+    df['库存货值(元)'] = df['库存数量'] * df['进货价']
+    total_value = df['库存货值(元)'].sum()
+def get_warn_info(remain):
+    if remain < 1: return ('🔴 紧急', '今日必须处理', '#ff4757')
+    if remain <= 3: return ('🟠 警告', '3天内过期', '#ffa502')
+    if remain <= 7: return ('🟡 注意', '7天内过期', '#ffd32a')
+    return ('🟢 正常', '库存健康', '#2ed573')
+df[['预警标签','预警说明','颜色']] = df['剩余保质期(天)'].apply(lambda x: pd.Series(get_warn_info(x)))
+df['预警等级排序'] = df['剩余保质期(天)'].apply(lambda x: 0 if x<1 else 1 if x<=3 else 2 if x<=7 else 3)
+# ====================== 筛选区域 ======================
+st.subheader("🔍 库存筛选")
+filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
+# 品类筛选
+all_cats = ['全部品类'] + sorted(df['品类'].unique().tolist())
+selected_cat = filter_col1.selectbox("按品类筛选", all_cats)
+# 临期等级筛选
+warn_levels = ['全部状态', '🔴 紧急（今日处理）', '🟠 警告（3天内过期）', '🟡 注意（7天内过期）', '🟢 正常库存']
+selected_level = filter_col2.selectbox("按临期状态筛选", warn_levels)
+# 供应商筛选
+all_suppliers = ['全部供应商'] + sorted(df['供应商名称'].unique().tolist())
+selected_supplier = filter_col3.selectbox("按供应商筛选", all_suppliers)
+# 搜索框
+search_keyword = filter_col4.text_input("搜索商品名称", placeholder="输入商品名关键词搜索")
+# 应用筛选
+filtered_df = df.copy()
+if selected_cat != '全部品类':
+    filtered_df = filtered_df[filtered_df['品类'] == selected_cat]
+if selected_level != '全部状态':
+    level_map = {
+        '🔴 紧急（今日处理）': '🔴 紧急',
+        '🟠 警告（3天内过期）': '🟠 警告',
+        '🟡 注意（7天内过期）': '🟡 注意',
+        '🟢 正常库存': '🟢 正常'
+    }
+    filtered_df = filtered_df[filtered_df['预警标签'] == level_map[selected_level]]
+if selected_supplier != '全部供应商':
+    filtered_df = filtered_df[filtered_df['供应商名称'] == selected_supplier]
+if search_keyword:
+    filtered_df = filtered_df[filtered_df['商品名称'].str.contains(search_keyword, case=False)]
+# 统一用主单位（出现最多的单位）
+main_unit = df['单位'].mode()[0] if len(df['单位'].mode())>0 else DEFAULT_UNIT
+st.info(f"当前筛选结果：共 {len(filtered_df)} 个SKU，总库存 {filtered_df['库存数量'].sum():.0f}{main_unit}")
+st.divider()
+# 顶部总览卡片（统一5列布局，更整齐）
+if len(filtered_df) == 0:
+    st.warning("当前筛选条件下没有商品，请调整筛选条件")
+    st.stop()
+total_sku = len(filtered_df)
+total_stock = filtered_df['库存数量'].sum()
+urgent_count = len(filtered_df[filtered_df['剩余保质期(天)']<1])
+warn_count = len(filtered_df[(filtered_df['剩余保质期(天)']>=1)&(filtered_df['剩余保质期(天)']<=3)])
+notice_count = len(filtered_df[(filtered_df['剩余保质期(天)']>3)&(filtered_df['剩余保质期(天)']<=7)])
+low_stock_count = len(filtered_df[filtered_df['库存数量'] <= LOW_STOCK_WARN])
+filter_total_value = filtered_df['库存货值(元)'].sum() if '库存货值(元)' in filtered_df.columns else None
+# 5列卡片布局，更美观
+cols = st.columns(5)
+cols[0].metric("筛选SKU总数", f"{total_sku} 个")
+cols[1].metric("筛选总库存量", f"{total_stock:.0f}{main_unit}")
+cols[2].metric("🔴 今日到期", f"{urgent_count} 个", delta="立即处理", delta_color="inverse")
+cols[3].metric("🟠 3天内到期", f"{warn_count} 个", delta="优先销售", delta_color="inverse")
+if filter_total_value and filter_total_value > 0:
+    cols[4].metric("筛选库存货值", f"{filter_total_value:.1f} 元")
 else:
-    st.title("🔒 数据后台")
-    pwd = st.text_input("管理密码", type="password")
-    if pwd != ADMIN_PASSWORD:
-        st.warning("请输入正确密码")
-        st.stop()
-    
-    df = load_data()
-    # 转回数字类型
-    for col in ["送货数量","进货单价","保质期(天)"]:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
-    st.success(f"登录成功，当前共 {len(df)} 条送货记录")
-    
-    st.subheader("数据筛选")
-    f1,f2,f3 = st.columns(3)
-    s_sup = f1.selectbox("按供应商", ["全部"] + sorted(df["供应商名称"].unique().tolist()))
-    s_date = f2.date_input("按送货日期", value=None)
-    s_cat = f3.selectbox("按品类", ["全部"] + sorted(df["品类"].dropna().unique().tolist()))
-    
-    df_show = df.copy()
-    if s_sup != "全部":
-        df_show = df_show[df_show["供应商名称"] == s_sup]
-    if s_date:
-        df_show = df_show[df_show["送货日期"] == s_date.strftime("%Y-%m-%d")]
-    if s_cat != "全部":
-        df_show = df_show[df_show["品类"] == s_cat]
-    
-    st.dataframe(df_show, use_container_width=True)
-    
-    c1,c2 = st.columns(2)
-    csv = df_show.to_csv(index=False, encoding='utf-8-sig')
-    c1.download_button("📥 导出当前筛选结果", csv, f"送货记录_{date.today()}.csv", "text/csv", use_container_width=True)
-    all_csv = df.to_csv(index=False, encoding='utf-8-sig')
-    c2.download_button("📥 导出全部历史记录", all_csv, f"全部送货记录_{date.today()}.csv", "text/csv", use_container_width=True)
-    
-    if st.button("⚠️ 清空所有记录（不可恢复）"):
-        save_data(pd.DataFrame(columns=df.columns))
-        st.success("已清空")
-        st.rerun()
+    cols[4].metric("📉 库存不足", f"{low_stock_count} 个", delta=f"低于{LOW_STOCK_WARN}{main_unit}", delta_color="inverse")
+# 第二行单独显示库存不足，避免布局错乱
+if filter_total_value and filter_total_value > 0:
+    st.metric("📉 库存不足商品", f"{low_stock_count} 个", delta=f"低于{LOW_STOCK_WARN}{main_unit}需补货", delta_color="inverse")
+st.divider()
+# 临期预警区域（用筛选后的数据）
+st.subheader("⚠️ 临期商品预警（按紧急程度排序）")
+warn_df = filtered_df[filtered_df['剩余保质期(天)']<=7].sort_values(['剩余保质期(天)', '库存数量'], ascending=[True, False])
+if len(warn_df) == 0:
+    st.success("🎉 当前筛选条件下没有临期商品，库存健康~")
+else:
+    # 按预警等级分组显示
+    tab_urgent, tab_warn, tab_notice = st.tabs([f"🔴 今日到期 ({urgent_count})", f"🟠 3天内到期 ({warn_count})", f"🟡 7天内到期 ({notice_count})"])
+    # 今日到期
+    with tab_urgent:
+        urgent_df = warn_df[warn_df['剩余保质期(天)']<1]
+        if len(urgent_df) == 0:
+            st.success("✅ 今日没有到期商品")
+        else:
+            cols = st.columns(min(len(urgent_df), 3))
+            for i, (_, r) in enumerate(urgent_df.iterrows()):
+                with cols[i % len(cols)]:
+                    suggest = "今日必须清完：降价/搭售/加工成净菜/员工内购"
+                    st.markdown(f"""
+                    <div style="padding:15px;border-radius:10px;background-color:{r['颜色']}15;border-left:5px solid {r['颜色']};margin-bottom:10px;">
+                        <h4 style="margin:0;color:{r['颜色']};">{r['商品名称']}</h4>
+                        <p style="margin:5px 0;font-size:14px;">{r['品类']} | 供应商：{r['供应商名称']}</p>
+                        <p style="margin:0;font-size:16px;font-weight:bold;">当前库存：{r['库存数量']:.0f}{r['单位']}</p>
+                        <p style="margin:8px 0 0 0;font-size:13px;">💡 {suggest}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+    # 3天内到期
+    with tab_warn:
+        w_df = warn_df[(warn_df['剩余保质期(天)']>=1)&(warn_df['剩余保质期(天)']<=3)]
+        if len(w_df) == 0:
+            st.success("✅ 3天内没有到期商品")
+        else:
+            cols = st.columns(min(len(w_df), 3))
+            for i, (_, r) in enumerate(w_df.iterrows()):
+                with cols[i % len(cols)]:
+                    suggest = "黄金陈列位销售，搭配临期品做组合优惠"
+                    st.markdown(f"""
+                    <div style="padding:15px;border-radius:10px;background-color:{r['颜色']}15;border-left:5px solid {r['颜色']};margin-bottom:10px;">
+                        <h4 style="margin:0;color:{r['颜色']};">{r['商品名称']}</h4>
+                        <p style="margin:5px 0;font-size:14px;">剩{r['剩余保质期(天)']}天 | {r['品类']} | {r['供应商名称']}</p>
+                        <p style="margin:0;font-size:16px;font-weight:bold;">当前库存：{r['库存数量']:.0f}{r['单位']}</p>
+                        <p style="margin:8px 0 0 0;font-size:13px;">💡 {suggest}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+    # 7天内到期
+    with tab_notice:
+        n_df = warn_df[(warn_df['剩余保质期(天)']>3)&(warn_df['剩余保质期(天)']<=7)]
+        if len(n_df) == 0:
+            st.success("✅ 7天内没有临期商品")
+        else:
+            cols = st.columns(min(len(n_df), 4))
+            for i, (_, r) in enumerate(n_df.iterrows()):
+                with cols[i % len(cols)]:
+                    suggest = "正常销售，每日检查新鲜度"
+                    st.markdown(f"""
+                    <div style="padding:15px;border-radius:10px;background-color:{r['颜色']}15;border-left:5px solid {r['颜色']};margin-bottom:10px;">
+                        <h4 style="margin:0;color:{r['颜色']};">{r['商品名称']}</h4>
+                        <p style="margin:5px 0;font-size:14px;">剩{r['剩余保质期(天)']}天 | {r['品类']}</p>
+                        <p style="margin:0;font-size:16px;font-weight:bold;">当前库存：{r['库存数量']:.0f}{r['单位']}</p>
+                        <p style="margin:8px 0 0 0;font-size:13px;">💡 {suggest}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+st.divider()
+# 库存不足提醒（筛选后）
+st.subheader("📉 库存不足提醒")
+low_df = filtered_df[filtered_df['库存数量'] <= LOW_STOCK_WARN].sort_values('库存数量')
+if len(low_df) == 0:
+    st.success(f"✅ 当前筛选条件下所有商品库存都高于{LOW_STOCK_WARN}{main_unit}，库存充足")
+else:
+    low_cols = st.columns(min(len(low_df), 3))
+    for i, (_, r) in enumerate(low_df.iterrows()):
+        with low_cols[i % len(low_cols)]:
+            st.error(f"""
+            **📦 {r['商品名称']}（{r['品类']}）**
+            \n供应商：{r['供应商名称']}
+            \n仅剩：**{r['库存数量']:.0f}{r['单位']}**
+            \n保质期剩余：{r['剩余保质期(天)']}天
+            """)
+st.divider()
+# 图表区域（全量数据，不受筛选影响，看整体结构）
+st.subheader("📊 整体库存结构分析（全量数据）")
+# 统计预警分布
+status_counts = df['预警标签'].value_counts().reindex(['🔴 紧急', '🟠 警告', '🟡 注意', '🟢 正常']).fillna(0)
+fig_status, ax_status = plt.subplots(figsize=(10, 3))
+bars = ax_status.bar(status_counts.index, status_counts.values, 
+                     color=['#ff4757', '#ffa502', '#ffd32a', '#2ed573'])
+ax_status.set_title("商品临期状态分布")
+for bar, val in zip(bars, status_counts.values):
+    ax_status.text(bar.get_x()+bar.get_width()/2, val+0.1, f'{int(val)}个', ha='center')
+st.pyplot(fig_status)
+fig_col1, fig_col2 = st.columns(2)
+with fig_col1:
+    st.markdown("**各品类库存数量占比**")
+    cat_stock = df.groupby('品类')['库存数量'].sum().sort_values(ascending=False)
+    fig1, ax1 = plt.subplots(figsize=(7,6))
+    colors = ['#ff6b6b', '#feca57', '#48dbfb', '#1dd1a1', '#ff9ff3', '#54a0ff', '#5f27cd']
+    wedges, texts, autotexts = ax1.pie(cat_stock.values, labels=cat_stock.index, autopct='%1.1f%%', 
+                                       startangle=90, colors=colors[:len(cat_stock)])
+    ax1.set_title("品类库存数量占比")
+    plt.setp(autotexts, size=10, weight="bold")
+    st.pyplot(fig1)
+with fig_col2:
+    st.markdown("**各品类库存数量对比**")
+    fig2, ax2 = plt.subplots(figsize=(8,6))
+    bars = ax2.barh(cat_stock.index[::-1], cat_stock.values[::-1], color='#48dbfb')
+    ax2.set_xlabel(f'库存数量（{main_unit}）')
+    for bar, val in zip(bars, cat_stock.values[::-1]):
+        ax2.text(val+max(cat_stock.values)*0.01, bar.get_y()+bar.get_height()/2, f'{val:.0f}{main_unit}', va='center')
+    st.pyplot(fig2)
+# 新增供应商库存统计
+if len(df['供应商名称'].unique()) > 1:
+    st.markdown("**各供应商库存分布**")
+    sup_stock = df.groupby('供应商名称')['库存数量'].sum().sort_values(ascending=False)
+    fig3, ax3 = plt.subplots(figsize=(10,4))
+    bars = ax3.bar(sup_stock.index, sup_stock.values, color='#00d2d3')
+    ax3.set_ylabel(f'库存数量（{main_unit}）')
+    for bar, val in zip(bars, sup_stock.values):
+        ax3.text(bar.get_x()+bar.get_width()/2, val+max(sup_stock.values)*0.01, f'{val:.0f}{main_unit}', ha='center')
+    plt.xticks(rotation=30, ha='right')
+    st.pyplot(fig3)
+st.divider()
+# 补货建议：动态根据数据生成
+st.subheader("📋 今日库存处理建议（智能生成）")
+suggestions = []
+# 临期处理建议
+if urgent_count + warn_count > 0:
+    suggestions.append("### 🔴 今日紧急处理")
+    urgent_names = warn_df[warn_df['剩余保质期(天)']<1]['商品名称'].tolist()
+    if urgent_names:
+        suggestions.append(f"- **必须今日处理**：{', '.join(urgent_names)}，建议降价30%-50%、满赠、搭售或者加工处理，避免全损")
+    warn3_names = warn_df[(warn_df['剩余保质期(天)']>=1)&(warn_df['剩余保质期(天)']<=3)]['商品名称'].tolist()
+    if warn3_names:
+        suggestions.append(f"- **3天内到期**：{', '.join(warn3_names)}，移到进门显眼位置做堆头销售，可组合做「新鲜菜包」优惠")
+    suggestions.append("- 临期叶菜类建议傍晚后打折出清，不要留到第二天")
+# 补货建议
+if low_stock_count > 0:
+    suggestions.append("\n### 🟡 补货提醒")
+    low_by_supplier = low_df.groupby('供应商名称')['商品名称'].apply(list).to_dict()
+    for sup, items in low_by_supplier.items():
+        suggestions.append(f"- **{sup}**：{', '.join(items)} 库存不足，请及时补货")
+# 正常库存建议
+normal_count = len(df[df['预警标签']=='🟢 正常'])
+if normal_count > 0:
+    suggestions.append("\n### 🟢 库存健康提示")
+    suggestions.append(f"- 当前共有 {normal_count} 个SKU库存状态健康，无需特殊处理")
+    long_shelf = df[df['剩余保质期(天)']>15]
+    if len(long_shelf) > 0:
+        suggestions.append(f"- 长保商品（土豆、萝卜、苹果等根茎类/水果）剩余保质期均超过15天，库存充足，本周可不用补货")
+st.markdown("\n".join(suggestions))
+st.divider()
+# 完整库存明细（筛选后的数据）
+with st.expander("📋 查看当前筛选条件下的完整库存明细", expanded=False):
+    show_cols = ['商品名称','品类','供应商名称','库存数量','单位','入库时间','剩余保质期(天)','预警标签']
+    if '库存货值(元)' in df.columns:
+        show_cols.append('库存货值(元)')
+    sorted_df = filtered_df[show_cols].sort_values(['预警等级排序','剩余保质期(天)', '库存数量'])
+    st.dataframe(sorted_df, use_container_width=True, hide_index=True)
+    # 导出按钮
+    col_export1, col_export2 = st.columns(2)
+    csv = sorted_df.to_csv(index=False, encoding='utf-8-sig')
+    col_export1.download_button(
+        label="📥 导出当前筛选结果为CSV",
+        data=csv,
+        file_name=f"库存筛选结果_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
+    # 导出全量数据
+    csv_all = df[show_cols].sort_values(['预警等级排序','剩余保质期(天)']).to_csv(index=False, encoding='utf-8-sig')
+    col_export2.download_button(
+        label="📥 导出全量库存数据为CSV",
+        data=csv_all,
+        file_name=f"全量库存_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
+st.divider()
+# 页脚统计
+total_expiring_7d = len(df[df['剩余保质期(天)']<=7])
+expiring_rate = total_expiring_7d / len(df) * 100 if len(df) >0 else 0
+st.caption(f"📊 全店共 {len(df)} 个SKU，总库存 {df['库存数量'].sum():.0f}{main_unit}，7天内临期商品 {total_expiring_7d} 个，占比 {expiring_rate:.1f}% | 优化版看板 v2.0")
