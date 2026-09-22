@@ -3,12 +3,17 @@ import glob
 import pandas as pd
 import numpy as np
 import streamlit as st
-import matplotlib.pyplot as plt
 from datetime import datetime
+# 自动检测matplotlib是否安装，没装就用streamlit原生图表
+try:
+    import matplotlib.pyplot as plt
+    MATPLOTLIB_AVAILABLE = True
+    plt.rcParams['font.sans-serif'] = ['SimHei', 'WenQuanYi Micro Hei', 'Arial Unicode MS', 'Noto Sans CJK SC', 'DejaVu Sans']
+    plt.rcParams['axes.unicode_minus'] = False
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
 # ========== 页面基础配置 ==========
 st.set_page_config(page_title="果蔬库存实时看板", layout="wide", page_icon="🥬", initial_sidebar_state="expanded")
-plt.rcParams['font.sans-serif'] = ['SimHei', 'WenQuanYi Micro Hei', 'Arial Unicode MS', 'Noto Sans CJK SC', 'DejaVu Sans']
-plt.rcParams['axes.unicode_minus'] = False
 # 自动找和py文件同一个目录下的inventory文件夹，不存在就自动创建
 current_dir = os.path.dirname(os.path.abspath(__file__))
 INVENTORY_FOLDER = os.path.join(current_dir, "inventory")
@@ -137,6 +142,8 @@ with st.sidebar:
     if st.button("🔄 刷新最新数据", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
+    if not MATPLOTLIB_AVAILABLE:
+        st.info("💡 当前环境未安装matplotlib，图表已自动切换为Streamlit原生样式")
     st.markdown("""
     ### 📖 使用说明
     1. 系统自动创建`inventory`文件夹，无需手动新建
@@ -341,43 +348,60 @@ st.divider()
 st.subheader("📊 整体库存结构分析（全量数据）")
 # 统计预警分布
 status_counts = df['预警标签'].value_counts().reindex(['🔴 紧急', '🟠 警告', '🟡 注意', '🟢 正常']).fillna(0)
-fig_status, ax_status = plt.subplots(figsize=(10, 3))
-bars = ax_status.bar(status_counts.index, status_counts.values, 
-                     color=['#ff4757', '#ffa502', '#ffd32a', '#2ed573'])
-ax_status.set_title("商品临期状态分布")
-for bar, val in zip(bars, status_counts.values):
-    ax_status.text(bar.get_x()+bar.get_width()/2, val+0.1, f'{int(val)}个', ha='center')
-st.pyplot(fig_status)
+if MATPLOTLIB_AVAILABLE:
+    fig_status, ax_status = plt.subplots(figsize=(10, 3))
+    bars = ax_status.bar(status_counts.index, status_counts.values, 
+                         color=['#ff4757', '#ffa502', '#ffd32a', '#2ed573'])
+    ax_status.set_title("商品临期状态分布")
+    for bar, val in zip(bars, status_counts.values):
+        ax_status.text(bar.get_x()+bar.get_width()/2, val+0.1, f'{int(val)}个', ha='center')
+    st.pyplot(fig_status)
+else:
+    # 无matplotlib时用streamlit原生柱状图
+    st.markdown("**商品临期状态分布**")
+    st.bar_chart(status_counts)
 fig_col1, fig_col2 = st.columns(2)
 with fig_col1:
-    st.markdown("**各品类库存数量占比**")
+    st.markdown("**各品类库存数量占比/对比**")
     cat_stock = df.groupby('品类')['库存数量'].sum().sort_values(ascending=False)
-    fig1, ax1 = plt.subplots(figsize=(7,6))
-    colors = ['#ff6b6b', '#feca57', '#48dbfb', '#1dd1a1', '#ff9ff3', '#54a0ff', '#5f27cd']
-    wedges, texts, autotexts = ax1.pie(cat_stock.values, labels=cat_stock.index, autopct='%1.1f%%', 
-                                       startangle=90, colors=colors[:len(cat_stock)])
-    ax1.set_title("品类库存数量占比")
-    plt.setp(autotexts, size=10, weight="bold")
-    st.pyplot(fig1)
+    if MATPLOTLIB_AVAILABLE:
+        fig1, ax1 = plt.subplots(figsize=(7,6))
+        colors = ['#ff6b6b', '#feca57', '#48dbfb', '#1dd1a1', '#ff9ff3', '#54a0ff', '#5f27cd']
+        wedges, texts, autotexts = ax1.pie(cat_stock.values, labels=cat_stock.index, autopct='%1.1f%%', 
+                                           startangle=90, colors=colors[:len(cat_stock)])
+        ax1.set_title("品类库存数量占比")
+        plt.setp(autotexts, size=10, weight="bold")
+        st.pyplot(fig1)
+    else:
+        # 原生图表直接显示柱状图
+        st.bar_chart(cat_stock)
 with fig_col2:
-    st.markdown("**各品类库存数量对比**")
-    fig2, ax2 = plt.subplots(figsize=(8,6))
-    bars = ax2.barh(cat_stock.index[::-1], cat_stock.values[::-1], color='#48dbfb')
-    ax2.set_xlabel(f'库存数量（{main_unit}）')
-    for bar, val in zip(bars, cat_stock.values[::-1]):
-        ax2.text(val+max(cat_stock.values)*0.01, bar.get_y()+bar.get_height()/2, f'{val:.0f}{main_unit}', va='center')
-    st.pyplot(fig2)
+    if MATPLOTLIB_AVAILABLE:
+        st.markdown("**各品类库存数量对比**")
+        fig2, ax2 = plt.subplots(figsize=(8,6))
+        bars = ax2.barh(cat_stock.index[::-1], cat_stock.values[::-1], color='#48dbfb')
+        ax2.set_xlabel(f'库存数量（{main_unit}）')
+        for bar, val in zip(bars, cat_stock.values[::-1]):
+            ax2.text(val+max(cat_stock.values)*0.01, bar.get_y()+bar.get_height()/2, f'{val:.0f}{main_unit}', va='center')
+        st.pyplot(fig2)
+    else:
+        st.markdown("**剩余保质期分布**")
+        shelf_df = df[['商品名称', '剩余保质期(天)']].set_index('商品名称').sort_values('剩余保质期(天)')
+        st.bar_chart(shelf_df)
 # 新增供应商库存统计
 if len(df['供应商名称'].unique()) > 1:
     st.markdown("**各供应商库存分布**")
     sup_stock = df.groupby('供应商名称')['库存数量'].sum().sort_values(ascending=False)
-    fig3, ax3 = plt.subplots(figsize=(10,4))
-    bars = ax3.bar(sup_stock.index, sup_stock.values, color='#00d2d3')
-    ax3.set_ylabel(f'库存数量（{main_unit}）')
-    for bar, val in zip(bars, sup_stock.values):
-        ax3.text(bar.get_x()+bar.get_width()/2, val+max(sup_stock.values)*0.01, f'{val:.0f}{main_unit}', ha='center')
-    plt.xticks(rotation=30, ha='right')
-    st.pyplot(fig3)
+    if MATPLOTLIB_AVAILABLE:
+        fig3, ax3 = plt.subplots(figsize=(10,4))
+        bars = ax3.bar(sup_stock.index, sup_stock.values, color='#00d2d3')
+        ax3.set_ylabel(f'库存数量（{main_unit}）')
+        for bar, val in zip(bars, sup_stock.values):
+            ax3.text(bar.get_x()+bar.get_width()/2, val+max(sup_stock.values)*0.01, f'{val:.0f}{main_unit}', ha='center')
+        plt.xticks(rotation=30, ha='right')
+        st.pyplot(fig3)
+    else:
+        st.bar_chart(sup_stock)
 st.divider()
 # 补货建议：动态根据数据生成
 st.subheader("📋 今日库存处理建议（智能生成）")
@@ -438,4 +462,4 @@ st.divider()
 # 页脚统计
 total_expiring_7d = len(df[df['剩余保质期(天)']<=7])
 expiring_rate = total_expiring_7d / len(df) * 100 if len(df) >0 else 0
-st.caption(f"📊 全店共 {len(df)} 个SKU，总库存 {df['库存数量'].sum():.0f}{main_unit}，7天内临期商品 {total_expiring_7d} 个，占比 {expiring_rate:.1f}% | 优化版看板 v2.0")
+st.caption(f"📊 全店共 {len(df)} 个SKU，总库存 {df['库存数量'].sum():.0f}{main_unit}，7天内临期商品 {total_expiring_7d} 个，占比 {expiring_rate:.1f}% | 优化版看板 v2.1")
