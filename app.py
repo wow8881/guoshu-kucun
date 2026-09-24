@@ -52,8 +52,13 @@ def load_shelf_config():
 @st.cache_data(show_spinner=False)
 def load_latest_inventory():
     files = []
+    # 系统自动生成的文件，排除掉不读
+    exclude_files = ["品类保质期配置.xlsx", "销售记录.xlsx"]
     for ext in ['xlsx', 'csv']:
-        files.extend(glob.glob(os.path.join(INVENTORY_FOLDER, f"*.{ext}")))
+        for f in glob.glob(os.path.join(INVENTORY_FOLDER, f"*.{ext}")):
+            fname = os.path.basename(f)
+            if fname not in exclude_files:  # 跳过系统文件
+                files.append(f)
     if not files:
         return None, "empty"
     latest_file = max(files, key=os.path.getmtime)
@@ -656,4 +661,4 @@ st.divider()
 # 页脚统计
 total_expiring_7d = len(df[df['剩余保质期(天)']<=7])
 expiring_rate = total_expiring_7d / len(df) * 100 if len(df) >0 else 0
-st.caption(f"📊 全店共 {len(df)} 个SKU，总库存 {df['库存数量'].sum():.0f}{main_unit}，7天内临期商品 {total_expiring_7d} 个，占比 {expiring_rate:.1f}% | 累计销售额 {sales_df['销售额'].sum():.1f} 元 | 优化版看板 v4.0（无进货价版+保质期实时同步）")
+st.caption(f"📊 全店共 {len(df)} 个SKU，总库存 {df['库存数量'].sum():.0f}{main_unit}，7天内临期商品 {total_expiring_7d} 个，占比 {expiring_rate:.1f}% | 累计销售额 {sales_df['销售额'].sum():.1f} 元 | 优化版看板 v4.1（修复文件读取bug）")
