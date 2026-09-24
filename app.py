@@ -3,7 +3,6 @@ import glob
 import pandas as pd
 import numpy as np
 import streamlit as st
-from datetime import datetime
 # 自动检测matplotlib是否安装，没装就用streamlit原生图表
 try:
     import matplotlib.pyplot as plt
@@ -12,6 +11,7 @@ try:
     plt.rcParams['axes.unicode_minus'] = False
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
+from datetime import datetime
 # ========== 页面基础配置 ==========
 st.set_page_config(page_title="果蔬库存实时看板", layout="wide", page_icon="🥬", initial_sidebar_state="expanded")
 # 自动找和py文件同一个目录下的inventory文件夹，不存在就自动创建
@@ -20,6 +20,36 @@ INVENTORY_FOLDER = os.path.join(current_dir, "inventory")
 os.makedirs(INVENTORY_FOLDER, exist_ok=True)  # 自动创建文件夹，不用手动建
 # 销售记录保存路径
 SALES_FILE = os.path.join(INVENTORY_FOLDER, "销售记录.xlsx")
+# 品类保质期配置文件路径
+SHELF_CONFIG_FILE = os.path.join(INVENTORY_FOLDER, "品类保质期配置.xlsx")
+# 内置默认品类保质期（常见果蔬）
+DEFAULT_SHELF_LIFE = {
+    "叶菜类": 3,
+    "花果类": 7,
+    "根茎类": 30,
+    "菌菇类": 5,
+    "豆类": 5,
+    "瓜类": 10,
+    "葱蒜类": 15,
+    "柑橘类": 15,
+    "仁果类": 30,
+    "浆果类": 5,
+    "核果类": 7,
+    "瓜类水果": 10,
+    "热带水果": 7
+}
+# 加载品类保质期配置
+@st.cache_data(show_spinner=False)
+def load_shelf_config():
+    if os.path.exists(SHELF_CONFIG_FILE):
+        config_df = pd.read_excel(SHELF_CONFIG_FILE)
+        return dict(zip(config_df['品类'], config_df['默认保质期(天)']))
+    else:
+        # 第一次使用默认配置，保存到文件
+        config_df = pd.DataFrame(list(DEFAULT_SHELF_LIFE.items()), columns=['品类', '默认保质期(天)'])
+        config_df.to_excel(SHELF_CONFIG_FILE, index=False)
+        return DEFAULT_SHELF_LIFE.copy()
+shelf_config = load_shelf_config()
 # 提前定义数据加载函数
 @st.cache_data(show_spinner=False)
 def load_latest_inventory():
@@ -61,7 +91,7 @@ with st.sidebar:
     st.divider()
     # ========== 数据提报/上传区域 ==========
     st.header("📝 库存管理")
-    data_tab1, data_tab2, data_tab3, data_tab4, data_tab5 = st.tabs(["📤 上传", "✍️ 新增", "📦 出库", "📊 盘点", "🗑️ 管理"])
+    data_tab1, data_tab2, data_tab3, data_tab4, data_tab5, data_tab6 = st.tabs(["📤 上传", "✍️ 新增", "📦 出库", "📊 盘点", "⏳ 保质期配置", "🗑️ 管理"])
     # 上传文件提报
     with data_tab1:
         uploaded_file = st.file_uploader("上传库存Excel/CSV", type=['xlsx', 'csv'], help="上传后自动保存到inventory文件夹，作为最新数据")
@@ -78,16 +108,29 @@ with st.sidebar:
                 st.rerun()
     # 手动录入单个商品
     with data_tab2:
+        # 先选品类，自动带出默认保质期
+        existing_cats = list(shelf_config.keys())
+        cat_options = sorted(existing_cats + ['自定义新分类'])
         with st.form("add_product_form", clear_on_submit=True):
             p_name = st.text_input("商品名称 *", placeholder="例如：上海青")
-            p_cat = st.text_input("品类 *", placeholder="例如：叶菜类")
+            col_cat, col_shelf = st.columns(2)
+            selected_cat_option = col_cat.selectbox("品类 *", options=cat_options)
+            if selected_cat_option == '自定义新分类':
+                p_cat = col_cat.text_input("输入新品类名称", placeholder="例如：预制菜类")
+                default_shelf = 7
+            else:
+                p_cat = selected_cat_option
+                default_shelf = shelf_config.get(p_cat, 7)
+            # 根据选的品类自动填充默认保质期
+            p_shelf = col_shelf.number_input("保质期(天) *", min_value=1, value=default_shelf, step=1, help="系统已根据品类自动填充默认值，可手动修改")
             col1, col2 = st.columns(2)
             p_stock = col1.number_input("库存数量 *", min_value=0, step=1)
-            p_shelf = col2.number_input("保质期(天) *", min_value=1, value=7, step=1)
-            p_in_date = st.date_input("入库时间", value=datetime.now())
+            p_in_date = col2.date_input("入库时间", value=datetime.now())
             p_unit = st.text_input("单位", value=DEFAULT_UNIT)
             p_price = st.number_input("进货价(元/单位)", min_value=0.0, step=0.1)
             p_supplier = st.text_input("供应商名称", value="未填写")
+            if p_cat in shelf_config and p_cat != '自定义新分类':
+                st.caption(f"✅ 已自动匹配「{p_cat}」默认保质期：{shelf_config[p_cat]}天，可手动修改")
             submit_add = st.form_submit_button("提交并同步到库存", use_container_width=True, type="primary")
             if submit_add:
                 if not p_name or not p_cat:
@@ -113,6 +156,11 @@ with st.sidebar:
                     save_name = f"库存更新_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
                     save_path = os.path.join(INVENTORY_FOLDER, save_name)
                     updated_df.to_excel(save_path, index=False)
+                    # 自动把新品类加入保质期配置
+                    if p_cat not in shelf_config and p_cat != '自定义新分类':
+                        shelf_config[p_cat] = p_shelf
+                        new_config = pd.DataFrame(list(shelf_config.items()), columns=['品类', '默认保质期(天)'])
+                        new_config.to_excel(SHELF_CONFIG_FILE, index=False)
                     st.success(f"✅ 已添加商品「{p_name}」并同步到文件夹")
                     st.cache_data.clear()
                     st.rerun()
@@ -187,8 +235,27 @@ with st.sidebar:
                 st.success("✅ 盘点结果已保存，库存已更新")
                 st.cache_data.clear()
                 st.rerun()
-    # 管理现有商品：修改库存/删除
+    # 品类保质期配置
     with data_tab5:
+        st.markdown("**品类保质期配置：选品类自动匹配默认保质期**")
+        config_df = pd.DataFrame(list(shelf_config.items()), columns=['品类', '默认保质期(天)'])
+        edited_config = st.data_editor(
+            config_df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="dynamic",
+            column_config={
+                "默认保质期(天)": st.column_config.NumberColumn(min_value=1, step=1)
+            }
+        )
+        if st.button("保存保质期配置", use_container_width=True, type="primary"):
+            edited_config.to_excel(SHELF_CONFIG_FILE, index=False)
+            st.success("✅ 保质期配置已保存，新增商品会自动匹配，老数据自动补全")
+            st.cache_data.clear()
+            st.rerun()
+        st.info("💡 可以新增/删除品类，修改对应默认保质期：\n- 新增商品选品类自动填充保质期\n- 上传的老数据如果保质期异常/没填，会自动按品类匹配默认保质期")
+    # 管理现有商品：修改库存/删除
+    with data_tab6:
         existing_df, _ = load_latest_inventory()
         if existing_df is None or len(existing_df) == 0:
             st.info("暂无库存数据，先上传或添加商品")
@@ -228,10 +295,11 @@ with st.sidebar:
     ### 📖 使用说明
     1. 系统自动创建`inventory`文件夹，无需手动新建
     2. 支持上传Excel/CSV、手动新增商品、销售出库扣库存、批量盘点、修改/删除商品
-    3. 所有操作自动保存同步到文件夹，自动加载最新版本，自动记录销售和毛利
-    4. **必填列**：商品名称、品类、库存数量、入库时间、保质期(天)
-    5. **可选列**：单位、进货价、供应商名称（填进货价自动算毛利）
-    6. 支持手机/电脑自适应显示
+    3. 内置品类保质期自动匹配：选品类自动填保质期，老数据异常保质期自动补全，可自定义每个品类保质期
+    4. 所有操作自动保存同步到文件夹，自动加载最新版本，自动记录销售和毛利
+    5. **必填列**：商品名称、品类、库存数量、入库时间
+    6. **可选列**：保质期(天)（不填自动按品类匹配）、单位、进货价、供应商名称
+    7. 支持手机/电脑自适应显示
     """)
 st.title(f"🥬 {SHOP_NAME} 库存实时数据看板")
 st.caption(f"最后更新时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}")
@@ -248,18 +316,24 @@ elif result[1].startswith("error:"):
 df, filename = result
 st.success(f"✅ 正在读取最新库存文件：{filename}")
 # 数据预处理
-required_cols = ['商品名称','品类','库存数量','入库时间','保质期(天)']
+required_cols = ['商品名称','品类','库存数量','入库时间']
 missing = [c for c in required_cols if c not in df.columns]
 if missing:
     st.error(f"❌ 文件缺少必填列：{', '.join(missing)}，请检查列名")
-    st.info("💡 必填列：商品名称、品类、库存数量、入库时间、保质期(天)；可选列：单位、进货价、供应商名称")
+    st.info("💡 必填列：商品名称、品类、库存数量、入库时间；可选列：保质期(天)（不填自动按品类匹配）、单位、进货价、供应商名称")
     st.stop()
 # 数据清洗：处理异常值
 df = df.dropna(subset=['商品名称', '品类'])  # 删除空名称空品类的行
 df['商品名称'] = df['商品名称'].astype(str).str.strip()
 df['品类'] = df['品类'].astype(str).str.strip()
 df['库存数量'] = pd.to_numeric(df['库存数量'], errors='coerce').fillna(0).clip(lower=0)  # 负数库存转为0
-df['保质期(天)'] = pd.to_numeric(df['保质期(天)'], errors='coerce').fillna(30).clip(lower=1)  # 异常保质期默认30天
+df['保质期(天)'] = pd.to_numeric(df['保质期(天)'], errors='coerce')
+# 自动按品类匹配保质期：异常值（空/0/超过365天）自动用配置里的默认值，匹配不到默认7天
+def fill_shelf_by_cat(row):
+    if pd.isna(row['保质期(天)']) or row['保质期(天)'] < 1 or row['保质期(天)'] > 365:
+        return shelf_config.get(row['品类'], 7)
+    return row['保质期(天)']
+df['保质期(天)'] = df.apply(fill_shelf_by_cat, axis=1).astype(int)
 # 补全可选字段
 if '单位' not in df.columns:
     df['单位'] = DEFAULT_UNIT
@@ -576,4 +650,4 @@ st.divider()
 # 页脚统计
 total_expiring_7d = len(df[df['剩余保质期(天)']<=7])
 expiring_rate = total_expiring_7d / len(df) * 100 if len(df) >0 else 0
-st.caption(f"📊 全店共 {len(df)} 个SKU，总库存 {df['库存数量'].sum():.0f}{main_unit}，7天内临期商品 {total_expiring_7d} 个，占比 {expiring_rate:.1f}% | 累计销售额 {sales_df['销售额'].sum():.1f} 元，累计毛利 {sales_df['毛利'].sum():.1f} 元 | 优化版看板 v3.0")
+st.caption(f"📊 全店共 {len(df)} 个SKU，总库存 {df['库存数量'].sum():.0f}{main_unit}，7天内临期商品 {total_expiring_7d} 个，占比 {expiring_rate:.1f}% | 累计销售额 {sales_df['销售额'].sum():.1f} 元，累计毛利 {sales_df['毛利'].sum():.1f} 元 | 优化版看板 v3.1")
