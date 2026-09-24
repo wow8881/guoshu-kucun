@@ -18,6 +18,8 @@ st.set_page_config(page_title="果蔬库存实时看板", layout="wide", page_ic
 current_dir = os.path.dirname(os.path.abspath(__file__))
 INVENTORY_FOLDER = os.path.join(current_dir, "inventory")
 os.makedirs(INVENTORY_FOLDER, exist_ok=True)  # 自动创建文件夹，不用手动建
+# 销售记录保存路径
+SALES_FILE = os.path.join(INVENTORY_FOLDER, "销售记录.xlsx")
 # 提前定义数据加载函数
 @st.cache_data(show_spinner=False)
 def load_latest_inventory():
@@ -43,6 +45,13 @@ def load_latest_inventory():
         return df, os.path.basename(latest_file)
     except Exception as e:
         return None, f"error:{str(e)}"
+# 加载销售记录
+@st.cache_data(show_spinner=False)
+def load_sales_records():
+    if os.path.exists(SALES_FILE):
+        return pd.read_excel(SALES_FILE)
+    else:
+        return pd.DataFrame(columns=['时间', '商品名称', '销售数量', '销售单价', '销售额', '毛利'])
 # ========== 侧边栏配置 ==========
 with st.sidebar:
     st.header("⚙️ 看板配置")
@@ -50,9 +59,9 @@ with st.sidebar:
     LOW_STOCK_WARN = st.number_input("库存预警阈值（低于该值提醒补货）", min_value=1, value=10, step=1)
     DEFAULT_UNIT = st.text_input("默认单位", value="斤")
     st.divider()
-    # ========== 新增：数据提报/上传区域 ==========
-    st.header("📝 数据提报/同步")
-    data_tab1, data_tab2, data_tab3 = st.tabs(["📤 上传文件", "✍️ 新增商品", "🗑️ 管理商品"])
+    # ========== 数据提报/上传区域 ==========
+    st.header("📝 库存管理")
+    data_tab1, data_tab2, data_tab3, data_tab4, data_tab5 = st.tabs(["📤 上传", "✍️ 新增", "📦 出库", "📊 盘点", "🗑️ 管理"])
     # 上传文件提报
     with data_tab1:
         uploaded_file = st.file_uploader("上传库存Excel/CSV", type=['xlsx', 'csv'], help="上传后自动保存到inventory文件夹，作为最新数据")
@@ -107,8 +116,79 @@ with st.sidebar:
                     st.success(f"✅ 已添加商品「{p_name}」并同步到文件夹")
                     st.cache_data.clear()
                     st.rerun()
-    # 管理现有商品：修改库存/删除
+    # 销售/出库功能
     with data_tab3:
+        existing_df, _ = load_latest_inventory()
+        if existing_df is None or len(existing_df) == 0:
+            st.info("暂无库存数据，先添加商品")
+        else:
+            if '单位' not in existing_df.columns:
+                existing_df['单位'] = DEFAULT_UNIT
+            if '进货价' not in existing_df.columns:
+                existing_df['进货价'] = 0
+            all_products = existing_df['商品名称'].tolist()
+            with st.form("sales_form", clear_on_submit=True):
+                sell_p = st.selectbox("选择出库商品", all_products)
+                p_info = existing_df[existing_df['商品名称']==sell_p].iloc[0]
+                col_s1, col_s2 = st.columns(2)
+                sell_qty = col_s1.number_input("出库数量", min_value=0.1, step=0.1, max_value=float(p_info['库存数量']))
+                sell_price = col_s2.number_input("销售单价(元)", min_value=0.0, step=0.1, value=float(p_info.get('进货价',0)*1.3))
+                st.caption(f"当前库存：{p_info['库存数量']:.0f}{p_info['单位']}，进货价：{p_info.get('进货价',0):.1f}元/{p_info['单位']}")
+                submit_sell = st.form_submit_button("确认出库并扣减库存", use_container_width=True, type="primary")
+                if submit_sell:
+                    # 扣减库存
+                    existing_df.loc[existing_df['商品名称']==sell_p, '库存数量'] = p_info['库存数量'] - sell_qty
+                    # 计算销售额和毛利
+                    sales_amount = sell_qty * sell_price
+                    profit = sell_qty * (sell_price - p_info.get('进货价',0))
+                    # 保存更新库存
+                    save_name = f"库存更新_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                    save_path = os.path.join(INVENTORY_FOLDER, save_name)
+                    existing_df.to_excel(save_path, index=False)
+                    # 保存销售记录
+                    sales_df = load_sales_records()
+                    new_sale = pd.DataFrame([{
+                        '时间': datetime.now().strftime('%Y-%m-%d %H:%M'),
+                        '商品名称': sell_p,
+                        '销售数量': sell_qty,
+                        '销售单价': sell_price,
+                        '销售额': sales_amount,
+                        '毛利': profit
+                    }])
+                    sales_df = pd.concat([sales_df, new_sale], ignore_index=True)
+                    sales_df.to_excel(SALES_FILE, index=False)
+                    st.success(f"✅ 出库成功：{sell_qty}{p_info['单位']} {sell_p}，销售额{sales_amount:.1f}元，毛利{profit:.1f}元")
+                    st.cache_data.clear()
+                    st.rerun()
+    # 批量盘点功能
+    with data_tab4:
+        st.markdown("**快速盘点：一次性修改多个商品库存**")
+        existing_df, _ = load_latest_inventory()
+        if existing_df is None or len(existing_df) == 0:
+            st.info("暂无库存数据")
+        else:
+            if '单位' not in existing_df.columns:
+                existing_df['单位'] = DEFAULT_UNIT
+            edited_df = st.data_editor(
+                existing_df[['商品名称', '品类', '库存数量', '单位']],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "库存数量": st.column_config.NumberColumn(min_value=0, step=1)
+                }
+            )
+            if st.button("保存盘点结果", use_container_width=True, type="primary"):
+                # 更新库存数量
+                for idx, row in edited_df.iterrows():
+                    existing_df.loc[existing_df['商品名称']==row['商品名称'], '库存数量'] = row['库存数量']
+                save_name = f"盘点更新_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                save_path = os.path.join(INVENTORY_FOLDER, save_name)
+                existing_df.to_excel(save_path, index=False)
+                st.success("✅ 盘点结果已保存，库存已更新")
+                st.cache_data.clear()
+                st.rerun()
+    # 管理现有商品：修改库存/删除
+    with data_tab5:
         existing_df, _ = load_latest_inventory()
         if existing_df is None or len(existing_df) == 0:
             st.info("暂无库存数据，先上传或添加商品")
@@ -147,10 +227,11 @@ with st.sidebar:
     st.markdown("""
     ### 📖 使用说明
     1. 系统自动创建`inventory`文件夹，无需手动新建
-    2. 可以直接上传Excel/CSV、手动新增商品、修改/删除商品
-    3. 所有操作自动保存同步到文件夹，自动加载最新版本
+    2. 支持上传Excel/CSV、手动新增商品、销售出库扣库存、批量盘点、修改/删除商品
+    3. 所有操作自动保存同步到文件夹，自动加载最新版本，自动记录销售和毛利
     4. **必填列**：商品名称、品类、库存数量、入库时间、保质期(天)
-    5. **可选列**：单位、进货价、供应商名称
+    5. **可选列**：单位、进货价、供应商名称（填进货价自动算毛利）
+    6. 支持手机/电脑自适应显示
     """)
 st.title(f"🥬 {SHOP_NAME} 库存实时数据看板")
 st.caption(f"最后更新时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}")
@@ -240,7 +321,7 @@ if search_keyword:
 main_unit = df['单位'].mode()[0] if len(df['单位'].mode())>0 else DEFAULT_UNIT
 st.info(f"当前筛选结果：共 {len(filtered_df)} 个SKU，总库存 {filtered_df['库存数量'].sum():.0f}{main_unit}")
 st.divider()
-# 顶部总览卡片（统一5列布局，更整齐）
+# 顶部总览卡片（统一布局）
 if len(filtered_df) == 0:
     st.warning("当前筛选条件下没有商品，请调整筛选条件")
     st.stop()
@@ -251,19 +332,38 @@ warn_count = len(filtered_df[(filtered_df['剩余保质期(天)']>=1)&(filtered_
 notice_count = len(filtered_df[(filtered_df['剩余保质期(天)']>3)&(filtered_df['剩余保质期(天)']<=7)])
 low_stock_count = len(filtered_df[filtered_df['库存数量'] <= LOW_STOCK_WARN])
 filter_total_value = filtered_df['库存货值(元)'].sum() if '库存货值(元)' in filtered_df.columns else None
-# 5列卡片布局，更美观
-cols = st.columns(5)
+# 加载销售数据统计
+sales_df = load_sales_records()
+today_str = datetime.now().strftime('%Y-%m-%d')
+today_sales = sales_df[sales_df['时间'].str.startswith(today_str)]['销售额'].sum() if len(sales_df) >0 else 0
+today_profit = sales_df[sales_df['时间'].str.startswith(today_str)]['毛利'].sum() if len(sales_df) >0 else 0
+# 库存健康度评分：0-100分
+health_score = 100
+health_score -= min(urgent_count*10, 40)  # 今日到期每个扣10分，最多扣40
+health_score -= min(warn_count*5, 25)    # 3天到期每个扣5分，最多扣25
+health_score -= min(low_stock_count*5, 25) # 库存不足每个扣5分，最多扣25
+health_score = max(0, health_score)
+# 健康度评分颜色
+if health_score >= 80:
+    score_color = "#2ed573"
+    score_text = "优秀"
+elif health_score >=60:
+    score_color = "#ffd32a"
+    score_text = "一般"
+else:
+    score_color = "#ff4757"
+    score_text = "需改进"
+# 6列卡片布局，兼容移动端自动换行
+cols = st.columns(6)
 cols[0].metric("筛选SKU总数", f"{total_sku} 个")
 cols[1].metric("筛选总库存量", f"{total_stock:.0f}{main_unit}")
 cols[2].metric("🔴 今日到期", f"{urgent_count} 个", delta="立即处理", delta_color="inverse")
 cols[3].metric("🟠 3天内到期", f"{warn_count} 个", delta="优先销售", delta_color="inverse")
-if filter_total_value and filter_total_value > 0:
-    cols[4].metric("筛选库存货值", f"{filter_total_value:.1f} 元")
-else:
-    cols[4].metric("📉 库存不足", f"{low_stock_count} 个", delta=f"低于{LOW_STOCK_WARN}{main_unit}", delta_color="inverse")
-# 第二行单独显示库存不足，避免布局错乱
-if filter_total_value and filter_total_value > 0:
-    st.metric("📉 库存不足商品", f"{low_stock_count} 个", delta=f"低于{LOW_STOCK_WARN}{main_unit}需补货", delta_color="inverse")
+cols[4].metric("📉 库存不足", f"{low_stock_count} 个", delta=f"低于{LOW_STOCK_WARN}{main_unit}", delta_color="inverse")
+cols[5].metric("💯 库存健康度", f"{health_score}分", delta=score_text)
+# 第二行：货值/经营数据
+value_text = f"{filter_total_value:.1f}元" if filter_total_value and filter_total_value>0 else "未统计"
+st.markdown(f"<h4 style='text-align:center;color:{score_color};'>今日销售额：{today_sales:.1f}元 | 今日毛利：{today_profit:.1f}元 | 当前筛选货值：{value_text}</h4>", unsafe_allow_html=True)
 st.divider()
 # 临期预警区域（用筛选后的数据）
 st.subheader("⚠️ 临期商品预警（按紧急程度排序）")
@@ -459,7 +559,21 @@ with st.expander("📋 查看当前筛选条件下的完整库存明细", expand
         use_container_width=True
     )
 st.divider()
+# 销售记录查询
+if len(sales_df) > 0:
+    with st.expander("💰 查看销售出库记录", expanded=False):
+        st.dataframe(sales_df.sort_values('时间', ascending=False), use_container_width=True, hide_index=True)
+        # 导出销售记录
+        sales_csv = sales_df.to_csv(index=False, encoding='utf-8-sig')
+        st.download_button(
+            label="📥 导出销售记录为CSV",
+            data=sales_csv,
+            file_name=f"销售记录_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+st.divider()
 # 页脚统计
 total_expiring_7d = len(df[df['剩余保质期(天)']<=7])
 expiring_rate = total_expiring_7d / len(df) * 100 if len(df) >0 else 0
-st.caption(f"📊 全店共 {len(df)} 个SKU，总库存 {df['库存数量'].sum():.0f}{main_unit}，7天内临期商品 {total_expiring_7d} 个，占比 {expiring_rate:.1f}% | 优化版看板 v2.1")
+st.caption(f"📊 全店共 {len(df)} 个SKU，总库存 {df['库存数量'].sum():.0f}{main_unit}，7天内临期商品 {total_expiring_7d} 个，占比 {expiring_rate:.1f}% | 累计销售额 {sales_df['销售额'].sum():.1f} 元，累计毛利 {sales_df['毛利'].sum():.1f} 元 | 优化版看板 v3.0")
